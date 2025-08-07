@@ -6,23 +6,22 @@
 #include <sstream>
 #include <string>
 #include <chrono>
-
+#include "../include/DataLoader.hpp"
+#include "../include/Constantes.hpp"
 #include "../include/calculador_costos_maquina.hpp"
 
 using namespace std;
 
-// Constantes energéticas
-const double POT_GAS1 = 171;
-const double POT_GAS2 = 171 + 171;
-const double POT_VAPOR = 563;
-const double CONSUMO_GN_M3PKWH = 0.167 / 0.717;
-const double COSTO_GN_USD_M3 = 618;
-const double COSTO_AGUA = std::numeric_limits<double>::max();
-const double COSTO_ARRANQUE = 4208.0 + (5.110 * COSTO_GN_USD_M3);
+struct SerieEolicaEvaluada
+{
+    std::vector<double> wind;
+    double costo_estimado;
+    std::vector<int> maquinas_por_hora;
+};
 
 vector<double> obtener_demanda()
 {
-    std::string ruta = "../data/parametros.in";
+    std::string ruta = "../data/demanda.in";
     std::ifstream archivo(ruta);
     std::vector<double> datos;
     std::string linea;
@@ -61,6 +60,14 @@ std::vector<double> generar_demanda_aleatoria()
     return datos;
 }
 
+double distancia(const std::vector<double> &a, const std::vector<double> &b)
+{
+    double suma = 0.0;
+    for (size_t i = 0; i < a.size(); ++i)
+        suma += std::abs(a[i] - b[i]);
+    return suma;
+}
+
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
@@ -87,111 +94,190 @@ int main(int argc, char **argv)
 
     MPI_Bcast(demanda.data(), cantidad_horas, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    if (size < 4 || (((size - 1) % 3) != 0))
-    {
-        if (rank == 0)
-            std::cerr << "Se requieren al menos 4 procesos y que sean multiplo de 3 + 1.\n";
-        MPI_Finalize();
-        return 1;
-    }
     std::ofstream archivo_resultado;
     long costo_total_operacion = 0.0;
-    std::vector<std::tuple<double, double, double>> *encender = new std::vector<std::tuple<double, double, double>>(demanda.size(), {0, 0, 0});
+    // std::vector<std::tuple<double, double, double>> *encender = new std::vector<std::tuple<double, double, double>>(demanda.size(), {0, 0, 0});
 
     if (rank == 0)
     {
         archivo_resultado.open("../resultados/seleccion_maquinas.csv");
-        archivo_resultado << "Eolica,Hora,MaquinaSeleccionada(1-Gas1, 2-Gas2, 3-Vapor),Costo,Encendida\n";
+        archivo_resultado << "Eolica,Hora,MaquinaSeleccionada(1-Gas1, 2-Gas2, 3-Vapor),Costo\n";
     }
 
-    for (int eolica = 0; eolica <= 1464; ++eolica) // Maxima eolica 1464
+    // Parámetros para anillo
+    const int siguiente = (rank + 1) % size;
+    const int anterior = (rank - 1 + size) % size;
+
+    // int horas_apagada = 0;
+    double costo_operacion = 0.0;
+
+    // Preparar una serie base por proceso (1 valor por hora)
+    // std::vector<double> serie_local(cantidad_horas);
+    // for (int h = 0; h < cantidad_horas; ++h)
+    // {
+    //     serie_local[h] = (1464.0 * ((rank + h) % 10)) / 10.0; // combinaciones distintas por rank
+    // }
+
+    std::vector<std::vector<double>> wind_data;
+    const int num_wind_series = 50;
+
+    if (cantidad_horas <= 0)
     {
+        MPI_Finalize();
+        return 1;
+    }
 
-        int horas_apagada = 0;
-        double costo_operacion = 0.0;
+    if (rank != 0)
+    {
+        demanda.resize(cantidad_horas);
+        wind_data.resize(num_wind_series);
+    }
 
-        std::vector<RespuestaMaquina> respuestas_local(demanda.size(), {0, 0});
-        if (rank != 0)
+    MPI_Bcast(demanda.data(), cantidad_horas, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    // Después del MPI_Bcast de cantidad_horas y de la carga en el 0:
+    if (rank != 0)
+    {
+        std::cout << "Cargando " << num_wind_series << " series de viento..." << std::endl;
+        wind_data = DataLoader::load_partitioned_wind_series("../data/wind_series", num_wind_series, rank, size);
+
+        // // --- DEBUG: VERIFICAR que cada serie tenga cantidad_horas ---
+        // for (int i = 0; i < num_wind_series; ++i)
+        // {
+        //     if (wind_data[i].size() != cantidad_horas)
+        //     {
+        //         std::cerr << "Error: Serie " << i << " tiene tamaño " << wind_data[i].size()
+        //                   << ", pero se esperan " << cantidad_horas << std::endl;
+        //         MPI_Abort(MPI_COMM_WORLD, 1);
+        //     }
+        // }
+        // SOLO los procesos que NO son 0 hacen resize de cada serie
+        for (auto &series : wind_data)
+            series.resize(cantidad_horas);
+    }
+
+    // // Broadcast de los datos de viento:
+    // for (int i = 0; i < num_wind_series; ++i)
+    //     MPI_Bcast(wind_data[i].data(), cantidad_horas, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    std::vector<SerieEolicaEvaluada> cache_local;
+    if (rank != 0)
+    {
+        for (int serie_id = 0; serie_id < wind_data.size(); ++serie_id)
         {
-            double potencia_disponible = 0;
+            const std::vector<double> &wind_serie = wind_data[serie_id];
+            std::vector<SeleccionHora> seleccion_horas(cantidad_horas);
+            double costo_estimado = evaluar_costo_serie_tres_maquinas(wind_serie, demanda, seleccion_horas);
 
-            int s = (size - 1) / 3;
-            int grupo = (rank - 1) / s; // 0: gas1, 1: gas2, 2: vapor
-            int idx_grupo = (rank - 1) % s;
-            int horas_por_proceso = cantidad_horas / s;
-            int resto = cantidad_horas % s;
-
-            // Calculá el rango exclusivo para cada proceso dentro del grupo:
-            int inicio = idx_grupo * horas_por_proceso + std::min(idx_grupo, resto);
-            int fin = inicio + horas_por_proceso + (idx_grupo < resto ? 1 : 0);
-
-            if (grupo == 0)
-                potencia_disponible = POT_GAS1;
-            else if (grupo == 1)
-                potencia_disponible = POT_GAS2;
-            else if (grupo == 2)
-                potencia_disponible = POT_VAPOR + POT_GAS1 + POT_GAS1;
-
-            for (int h = inicio; h < fin; ++h)
+            std::vector<double> costos_por_hora(cantidad_horas);
+            std::vector<int> maquinas_por_hora(cantidad_horas);
+            for (int h = 0; h < cantidad_horas; ++h)
             {
-
-                double demanda_h = demanda[h];
-
-                demanda_h -= eolica;
-                if (demanda_h < 0)
-                    demanda_h = 0;
-
-                if (demanda_h <= 0.0)
-                {
-                    horas_apagada++;
-                    respuestas_local[h] = {0, 0};
-                    continue;
-                }
-                else
-                {
-                    respuestas_local[h] = calcular_costo(eolica, demanda_h, h, potencia_disponible, horas_apagada);
-                    horas_apagada = 0; // Reseteamos horas apagada
-                }
+                costos_por_hora[h] = seleccion_horas[h].costo;
+                maquinas_por_hora[h] = seleccion_horas[h].maquina;
             }
-        }
-        std::vector<RespuestaMaquina> buffer(size * demanda.size());
-        MPI_Gather(respuestas_local.data(), demanda.size() * sizeof(RespuestaMaquina), MPI_BYTE,
-                   buffer.data(), demanda.size() * sizeof(RespuestaMaquina), MPI_BYTE,
-                   0, MPI_COMM_WORLD);
 
-        if (rank == 0)
-        {
-            for (int h = 0; h < demanda.size(); ++h)
+            SerieEolicaEvaluada mi_resultado{wind_serie, costo_estimado, maquinas_por_hora};
+
+            // bool encontrada = false;
+            // for (SerieEolicaEvaluada &c : cache_local)
+            // {
+            //     if (distancia(c.wind, wind_serie) < 1000.0)
+            //     {
+            //         mi_resultado.costo_estimado = c.costo_estimado;
+            //         encontrada = true;
+            //         break;
+            //     }
+            // }
+
+            // // Si no la encontró, la calcula y la agrega al cache
+            // if (!encontrada)
+            // {
+            //     evaluada_local.costo_estimado = evaluar_costo_serie_tres_maquinas(
+            //         wind_serie, demand_data, seleccion_horas);
+            //     cache_local.push_back(evaluada_local);
+            // }
+
+            // // Guardar, enviar, imprimir... usar serie_id
+            // std::cout << "Proceso " << rank << " está recorriendo serie: " << serie_id << std::endl;
+
+            // ----- Comunicación en anillo -----
+            SerieEolicaEvaluada buffer = mi_resultado;
+            for (int paso = 0; paso < size - 1; ++paso)
             {
-                double costo_total = 0;
-                int mejor_proceso = -1;
-                double horas_encendida = 0;
-                double menor_costo = std::numeric_limits<double>::max();
+                // 1. Serializar el tamaño
+                int len = buffer.wind.size();
+                MPI_Sendrecv_replace(&len, 1, MPI_INT, siguiente, 10, anterior, 10, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-                for (int i = 1; i < size; ++i)
+                // 2. Serializar el viento
+                MPI_Sendrecv_replace(buffer.wind.data(), len, MPI_DOUBLE, siguiente, 11, anterior, 11, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+                // 3. Serializar el costo total
+                MPI_Sendrecv_replace(&buffer.costo_estimado, 1, MPI_DOUBLE, siguiente, 12, anterior, 12, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+                // 4. Serializar las máquinas por hora
+                MPI_Sendrecv_replace(buffer.maquinas_por_hora.data(), len, MPI_INT, siguiente, 14, anterior, 14, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+                // === Comparar por distancia, guardar mejor ===
+                double dist = distancia(mi_resultado.wind, buffer.wind);
+                if (dist > 0 && dist < Constantes::UMBRAL_DISTANCIA)
                 {
-                    const auto &resp = buffer[i * cantidad_horas + h];
-                    // Obtengo el de menor costo
-                    if (resp.costo < menor_costo && resp.encendida > 0)
+                    if (buffer.costo_estimado < mi_resultado.costo_estimado)
                     {
-                        menor_costo = resp.costo;
-                        mejor_proceso = i;
-                        horas_encendida = resp.encendida;
+                        mi_resultado = buffer;
                     }
                 }
-
-                if (mejor_proceso != -1)
-                {
-                    costo_total += menor_costo;
-                    archivo_resultado << eolica << "," << h << "," << mejor_proceso << "," << menor_costo << "," << horas_encendida << "\n";
-                }
-                costo_total_operacion += costo_total;
             }
+
+            // 1. SerieID
+            MPI_Send(&serie_id, 1, MPI_INT, 0, 1, MPI_COMM_WORLD);
+            // 2. Viento
+            MPI_Send(mi_resultado.wind.data(), cantidad_horas, MPI_DOUBLE, 0, 2, MPI_COMM_WORLD);
+            // 3. Máquinas por hora
+            MPI_Send(mi_resultado.maquinas_por_hora.data(), cantidad_horas, MPI_INT, 0, 3, MPI_COMM_WORLD);
+            // 4. Costo total de la serie
+            MPI_Send(&mi_resultado.costo_estimado, 1, MPI_DOUBLE, 0, 4, MPI_COMM_WORLD);
         }
     }
     if (rank == 0)
     {
-        archivo_resultado << "Costo total: " << costo_total_operacion << " USD\n";
+        for (int p = 1; p < size; ++p)
+        {
+            // double costo;
+            // std::vector<double> costos_por_hora(cantidad_horas);
+            // std::vector<int> maquinas_por_hora(cantidad_horas);
+            // MPI_Recv(&costo, 1, MPI_DOUBLE, p, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            // MPI_Recv(costos_por_hora.data(), cantidad_horas, MPI_DOUBLE, p, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            // MPI_Recv(maquinas_por_hora.data(), cantidad_horas, MPI_INT, p, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            // for (int h = 0; h < cantidad_horas; ++h)
+            // {
+            //     archivo_resultado << h << "," << costos_por_hora[h] << "," << maquinas_por_hora[h] << "\n";
+            // }
+
+            for (int serie_id = p; serie_id < num_wind_series; serie_id += size)
+            {
+                std::vector<double> wind(cantidad_horas);
+                std::vector<double> costos_por_hora(cantidad_horas);
+                std::vector<int> maquinas_por_hora(cantidad_horas);
+                double costo_total;
+                int serie_id_rec;
+
+                // 1. SerieID
+                MPI_Recv(&serie_id_rec, 1, MPI_INT, p, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                // 2. Viento
+                MPI_Recv(wind.data(), cantidad_horas, MPI_DOUBLE, p, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                // 3. Máquinas por hora
+                MPI_Recv(maquinas_por_hora.data(), cantidad_horas, MPI_INT, p, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                // 4. Costo total de la serie
+                MPI_Recv(&costo_total, 1, MPI_DOUBLE, p, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+                for (int h = 0; h < cantidad_horas; ++h)
+                {
+                    archivo_resultado << serie_id_rec << "," << h << "," << wind[h] << "," << maquinas_por_hora[h] << "," << costo_total << "\n";
+                }
+            }
+        }
         archivo_resultado.close();
     }
 

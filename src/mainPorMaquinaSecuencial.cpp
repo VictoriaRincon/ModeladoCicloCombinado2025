@@ -7,22 +7,14 @@
 #include <chrono>
 #include <ctime>
 
+#include "../include/Constantes.hpp"
 #include "../include/calculador_costos_maquina.hpp"
 
 using namespace std;
 
-// Constantes energéticas
-const double POT_GAS1 = 171;
-const double POT_GAS2 = 171 + 171;
-const double POT_VAPOR = 563;
-const double CONSUMO_GN_M3PKWH = 0.167 / 0.717;
-const double COSTO_GN_USD_M3 = 618;
-const double COSTO_AGUA = std::numeric_limits<double>::max();
-const double COSTO_ARRANQUE = 4208.0 + (5.110 * COSTO_GN_USD_M3);
-
 vector<double> obtener_demanda()
 {
-    std::string ruta = "../data/parametros.in";
+    std::string ruta = "../data/demanda.in";
     std::ifstream archivo(ruta);
     std::vector<double> datos;
     std::string linea;
@@ -96,9 +88,9 @@ int main()
             }
             else
             {
-                respuestas[0] = calcular_costo(eolica, demanda_h, h, POT_GAS1, horas_apagada);
-                respuestas[1] = calcular_costo(eolica, demanda_h, h, POT_GAS2, horas_apagada);
-                respuestas[2] = calcular_costo(eolica, demanda_h, h, POT_VAPOR + POT_GAS1 + POT_GAS1, horas_apagada);
+                respuestas[0] = calcular_costo(eolica, demanda_h, h, Constantes::POT_GAS_1, horas_apagada);
+                respuestas[1] = calcular_costo(eolica, demanda_h, h, Constantes::POT_GAS_2, horas_apagada);
+                respuestas[2] = calcular_costo(eolica, demanda_h, h, Constantes::POT_VAPOR + Constantes::POT_GAS_1 + Constantes::POT_GAS_1, horas_apagada);
                 respuestas[3] = calcular_costo(eolica, demanda_h, h, std::numeric_limits<double>::max(), horas_apagada);
                 horas_apagada = 0; // Reseteamos horas apagada
             }
