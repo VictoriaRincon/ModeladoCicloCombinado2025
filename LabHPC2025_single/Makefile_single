@@ -1,0 +1,38 @@
+# Makefile for the single-threaded island model simulation
+
+# Compiler and flags
+CXX = g++
+CXXFLAGS = -std=c++17 -O3 -Wall -I./include
+LDFLAGS = -lm
+
+# Directories
+SRCDIR = ./src
+BUILDDIR = ./build_single
+BINDIR = ./bin
+TARGET = $(BINDIR)/ga_single_island
+
+# Source files and object files
+SOURCES = $(SRCDIR)/main_single_island.cpp $(SRCDIR)/ga.cpp $(SRCDIR)/solucion.cpp $(SRCDIR)/unidad_termica.cpp
+OBJECTS = $(SOURCES:$(SRCDIR)/%.cpp=$(BUILDDIR)/%.o)
+
+.PHONY: all clean
+
+# Default target
+all: $(TARGET)
+
+# Link the executable
+$(TARGET): $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Build finished: $(TARGET)"
+
+# Compile source files into object files
+$(BUILDDIR)/%.o: $(SRCDIR)/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Clean up build files
+clean:
+	rm -rf $(BUILDDIR) $(TARGET)
+	@echo "Cleaned build artifacts."
+

@@ -25,8 +25,9 @@ const double PENALIZACION_RESTRICCION = 1e6;
 
 
 // ================== PARÁMETROS DEL ALGORITMO GENÉTICO (MODELO DE ISLAS) ==================
+const int NUM_ISLAS = 32;                   // Número de poblaciones (islas) a simular
 const int TAMANO_POBLACION = 1000;         // Individuos por isla
-const int NUM_GENERACIONES_TOTAL = 100000;   // Criterio de parada principal
+const int NUM_GENERACIONES_TOTAL = 10000000;   // Criterio de parada principal
 const int GENERACIONES_POR_EPOCA = 50;    // Generaciones entre migraciones
 const int NUM_ELITES_MIGRACION = 20;       // Cuántos individuos migran
 const double PROBABILIDAD_CRUCE = 0.85;
